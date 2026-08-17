@@ -5,6 +5,7 @@ node_modules/
 .env*.local
 *.tsbuildinfo
 next-env.d.ts
+coverage/
 # END Node / Next.js
 
 # BEGIN DAW — pipeline runtime, NOT committed (managed by DAW)

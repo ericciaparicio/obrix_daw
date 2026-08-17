@@ -92,3 +92,10 @@ errores de tipos, build exitoso.
 Total: 15 categorías revisadas limpias, 1 supresión documentada (Moderate, dev-only), 0
 Critical/High abiertos.
 Result: **PASSED**
+
+## Re-corrida (loop correctivo VERIFY→CODE, 2026-08-17)
+
+Se agregaron 2 tests a `app/obra/page.test.tsx` (rama de éxito y de error genérico, cerrando una
+brecha de cobertura detectada en VERIFY) — sin código de producción nuevo. Re-scan: sin patrones
+riesgosos en el archivo nuevo (mock de `fetch`, sin red/DB real). `pnpm audit`: mismo resultado, 0
+Critical/High, 1 Moderate (misma supresión ya aprobada, sin cambios). Result: **PASSED**.
