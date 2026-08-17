@@ -2,24 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { crearObra, ObraYaExisteError } from "../../../lib/obra/service";
 import { getCurrentConstructorId } from "../../../lib/auth/current-constructor";
-
-/**
- * Junta TODOS los issues de Zod en un solo objeto `{ campo: mensaje }` (no falla-rápido en el
- * primero — spec Block 2, "Error handling"). Si un campo tiene más de un issue, se conserva el
- * primero encontrado.
- */
-function formatearErroresDeValidacion(error: z.ZodError): Record<string, string> {
-  const fields: Record<string, string> = {};
-
-  for (const issue of error.issues) {
-    const campo = issue.path.join(".") || "_root";
-    if (!(campo in fields)) {
-      fields[campo] = issue.message;
-    }
-  }
-
-  return fields;
-}
+import { formatearErroresDeValidacion } from "../../../lib/http/validation-errors";
 
 export async function POST(request: NextRequest) {
   const constructorId = getCurrentConstructorId();
