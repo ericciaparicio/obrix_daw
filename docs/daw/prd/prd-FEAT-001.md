@@ -5,7 +5,7 @@
 | Ticket | FEAT-001 |
 | Tracker | none |
 | Date | 2026-08-17 |
-| PRD loops | 1 |
+| PRD loops | 2 |
 
 ## Context and Problem
 
@@ -102,8 +102,8 @@ reporte financiero (tickets futuros).
 
 ## Dependencies
 
-- Base de datos PostgreSQL con Prisma (`db push`, sin migraciones) para persistir Obra, Presupuesto
-  y Constructor.
+- Base de datos PostgreSQL con Prisma (`db push`, sin migraciones) para persistir Obra (con su
+  presupuesto inicial como campo propio, sin tabla separada) y Constructor.
 - Un registro fijo de Constructor (seed) debe existir en base de datos para que la obra pueda
   asociarse a él.
 - No depende de RF-07/RF-08 (autenticación) para completarse este ticket, pero sí para que la
