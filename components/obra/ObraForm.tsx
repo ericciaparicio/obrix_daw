@@ -3,17 +3,37 @@
 import { useState, type CSSProperties, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { z } from "zod";
-import { crearObraSchema } from "../../lib/obra/schema";
+import { crearObraSchema, obraBaseSchema, presupuestoSchema } from "../../lib/obra/schema";
 
 /**
- * Modo del formulario. Hoy solo existe "crear" (Block 3). El spec de FEAT-001 anticipa que el
- * Block 5 agrega "editar" a este mismo componente (pre-carga de valores + `PATCH` en vez de
- * `POST`) — por eso el estado y los helpers de abajo (`valoresIniciales`, `construirPayload`,
- * `mapearErroresZod`) están separados de `handleSubmit` en piezas chicas y reusables, para que
- * agregar ese modo sea extender esta lógica, no reescribirla.
+ * Modo del formulario: "crear" (Block 3, alta combinada obra + presupuesto en un solo `POST`) o
+ * "editar" (Block 5, dos guardados independientes vía `PATCH`). En modo "editar", `obraId` y
+ * `obraInicial` son obligatorios en la práctica — el único caller de ese modo es
+ * `app/obra/editar/page.tsx`, que siempre los provee tras un `GET /api/obras/actual` exitoso —
+ * pero quedan opcionales a nivel de tipo para no forzar un union type discriminado que
+ * complicaría el resto del componente sin necesidad real (no hay ningún otro caller).
  */
 export interface ObraFormProps {
-  mode: "crear";
+  mode: "crear" | "editar";
+  obraId?: string;
+  obraInicial?: ObraInicialEditar;
+}
+
+/**
+ * Forma de los datos con los que se pre-carga el modo "editar" — coincide con lo que devuelve
+ * `GET /api/obras/actual` (sin el `id`, que viaja aparte como `obraId`).
+ */
+export interface ObraInicialEditar {
+  nombre: string;
+  pais: string;
+  provincia: string;
+  localidad: string;
+  direccion: string;
+  latitud: number;
+  longitud: number;
+  fechaInicio: string;
+  fechaFin: string | null;
+  presupuestoInicial: number | null;
 }
 
 interface FormValues {
@@ -53,6 +73,19 @@ const camposTexto: Array<{
   { name: "direccion", label: "Dirección" },
 ];
 
+/** Claves de `FormValues` que pertenecen a la sección "datos de la obra" (todo menos presupuesto). */
+const camposObraKeys: Array<keyof FormValues> = [
+  "nombre",
+  "pais",
+  "provincia",
+  "localidad",
+  "direccion",
+  "latitud",
+  "longitud",
+  "fechaInicio",
+  "fechaFin",
+];
+
 /**
  * `Number("")` da `0` — un valor numérico "válido" — así que hay que forzarlo a `NaN` para que
  * Zod lo trate como "falta el campo" en vez de como "0" (que para latitud sería el ecuador, un
@@ -63,7 +96,29 @@ function aNumero(valor: string): number {
   return limpio === "" ? NaN : Number(limpio);
 }
 
-function construirPayload(values: FormValues): unknown {
+/** `<input type="date">` espera `yyyy-MM-dd`; el ISO que devuelve la API trae hora y offset. */
+function aFechaInput(iso: string): string {
+  return iso.slice(0, 10);
+}
+
+/** Convierte los datos de la obra actual (Block 4/GET actual) al `FormValues` de pre-carga. */
+function valoresDesdeObraInicial(obra: ObraInicialEditar): FormValues {
+  return {
+    nombre: obra.nombre,
+    pais: obra.pais,
+    provincia: obra.provincia,
+    localidad: obra.localidad,
+    direccion: obra.direccion,
+    latitud: String(obra.latitud),
+    longitud: String(obra.longitud),
+    fechaInicio: aFechaInput(obra.fechaInicio),
+    fechaFin: obra.fechaFin ? aFechaInput(obra.fechaFin) : "",
+    presupuestoInicial:
+      obra.presupuestoInicial != null ? String(obra.presupuestoInicial) : "",
+  };
+}
+
+function construirPayloadObra(values: FormValues): unknown {
   return {
     nombre: values.nombre,
     pais: values.pais,
@@ -74,7 +129,20 @@ function construirPayload(values: FormValues): unknown {
     longitud: aNumero(values.longitud),
     fechaInicio: values.fechaInicio,
     fechaFin: values.fechaFin.trim() === "" ? null : values.fechaFin,
+  };
+}
+
+function construirPayloadPresupuesto(values: FormValues): unknown {
+  return {
     presupuestoInicial: aNumero(values.presupuestoInicial),
+  };
+}
+
+/** Modo "crear" (Block 3): combina los campos de obra + presupuesto en un solo payload. */
+function construirPayloadCrear(values: FormValues): unknown {
+  return {
+    ...(construirPayloadObra(values) as Record<string, unknown>),
+    ...(construirPayloadPresupuesto(values) as Record<string, unknown>),
   };
 }
 
@@ -97,23 +165,47 @@ function mapearErroresZod(error: z.ZodError): Record<string, string> {
   return fields;
 }
 
-export default function ObraForm({ mode }: ObraFormProps) {
-  void mode; // Único valor posible hoy; Block 5 lo va a usar para bifurcar a "editar".
+/**
+ * Modo "editar" separa el guardado en dos secciones independientes (obra vs. presupuesto), cada
+ * una contra su propio endpoint `PATCH` (Block 4). Al re-validar una sección hay que limpiar SOLO
+ * los errores que le pertenecen a esa sección antes de fusionar los nuevos — si no, un error viejo
+ * de la otra sección (o uno ya corregido de esta) puede quedar pisado o colgado.
+ */
+function fusionarErrores(
+  previos: Record<string, string>,
+  claves: readonly string[],
+  nuevos: Record<string, string>
+): Record<string, string> {
+  const siguiente = { ...previos };
+  for (const clave of claves) {
+    delete siguiente[clave];
+  }
+  return { ...siguiente, ...nuevos };
+}
+
+const MENSAJE_ERROR_INESPERADO = "Ocurrió un error inesperado. Intentá de nuevo.";
+const MENSAJE_OBRA_NO_ENCONTRADA = "No encontramos tu obra. Te redirigimos...";
+
+export default function ObraForm(props: ObraFormProps) {
+  const { mode, obraId, obraInicial } = props;
 
   const router = useRouter();
-  const [values, setValues] = useState<FormValues>(valoresIniciales);
+  const [values, setValues] = useState<FormValues>(
+    mode === "editar" && obraInicial ? valoresDesdeObraInicial(obraInicial) : valoresIniciales
+  );
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [mensajeGeneral, setMensajeGeneral] = useState<string | null>(null);
-  const [enviando, setEnviando] = useState(false);
+  const [enviandoObra, setEnviandoObra] = useState(false);
+  const [enviandoPresupuesto, setEnviandoPresupuesto] = useState(false);
 
   function actualizarCampo(name: keyof FormValues, value: string) {
     setValues((prev) => ({ ...prev, [name]: value }));
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmitCrear(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const payload = construirPayload(values);
+    const payload = construirPayloadCrear(values);
     const resultado = crearObraSchema.safeParse(payload);
 
     // El cliente valida primero para feedback inmediato, pero nunca confía solo en esto: la
@@ -126,7 +218,7 @@ export default function ObraForm({ mode }: ObraFormProps) {
 
     setErrors({});
     setMensajeGeneral(null);
-    setEnviando(true);
+    setEnviandoObra(true);
 
     try {
       const response = await fetch("/api/obras", {
@@ -152,22 +244,124 @@ export default function ObraForm({ mode }: ObraFormProps) {
         return;
       }
 
-      setMensajeGeneral("Ocurrió un error inesperado. Intentá de nuevo.");
+      setMensajeGeneral(MENSAJE_ERROR_INESPERADO);
     } catch {
-      setMensajeGeneral("Ocurrió un error inesperado. Intentá de nuevo.");
+      setMensajeGeneral(MENSAJE_ERROR_INESPERADO);
     } finally {
-      setEnviando(false);
+      setEnviandoObra(false);
     }
   }
 
-  return (
-    <form onSubmit={handleSubmit} noValidate data-testid="obra-form" style={estiloFormulario}>
-      {mensajeGeneral && (
-        <p role="alert" style={estiloMensajeGeneral}>
-          {mensajeGeneral}
-        </p>
-      )}
+  /**
+   * Modo "editar" — guarda los campos de la obra (todo menos presupuesto) contra
+   * `PATCH /api/obras/:id`, de forma independiente del guardado del presupuesto (ver
+   * `handleSubmitPresupuestoEditar`): son dos endpoints distintos (Block 4).
+   */
+  async function handleSubmitObraEditar(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (mode !== "editar" || !obraId) return;
 
+    const payload = construirPayloadObra(values);
+    const resultado = obraBaseSchema.safeParse(payload);
+
+    if (!resultado.success) {
+      setErrors((prev) =>
+        fusionarErrores(prev, camposObraKeys, mapearErroresZod(resultado.error))
+      );
+      setMensajeGeneral(null);
+      return;
+    }
+
+    setErrors((prev) => fusionarErrores(prev, camposObraKeys, {}));
+    setMensajeGeneral(null);
+    setEnviandoObra(true);
+
+    try {
+      const response = await fetch(`/api/obras/${obraId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(resultado.data),
+      });
+
+      if (response.status === 200) {
+        return;
+      }
+
+      if (response.status === 400) {
+        const body = await response.json();
+        setErrors((prev) => fusionarErrores(prev, camposObraKeys, body.fields ?? {}));
+        return;
+      }
+
+      if (response.status === 404) {
+        setMensajeGeneral(MENSAJE_OBRA_NO_ENCONTRADA);
+        router.push("/obra");
+        return;
+      }
+
+      setMensajeGeneral(MENSAJE_ERROR_INESPERADO);
+    } catch {
+      setMensajeGeneral(MENSAJE_ERROR_INESPERADO);
+    } finally {
+      setEnviandoObra(false);
+    }
+  }
+
+  /** Modo "editar" — guarda el presupuesto contra `PATCH /api/obras/:id/presupuesto`. */
+  async function handleSubmitPresupuestoEditar(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (mode !== "editar" || !obraId) return;
+
+    const payload = construirPayloadPresupuesto(values);
+    const resultado = presupuestoSchema.safeParse(payload);
+
+    if (!resultado.success) {
+      setErrors((prev) =>
+        fusionarErrores(prev, ["presupuestoInicial"], mapearErroresZod(resultado.error))
+      );
+      setMensajeGeneral(null);
+      return;
+    }
+
+    setErrors((prev) => fusionarErrores(prev, ["presupuestoInicial"], {}));
+    setMensajeGeneral(null);
+    setEnviandoPresupuesto(true);
+
+    try {
+      const response = await fetch(`/api/obras/${obraId}/presupuesto`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(resultado.data),
+      });
+
+      if (response.status === 200) {
+        return;
+      }
+
+      if (response.status === 400) {
+        const body = await response.json();
+        setErrors((prev) =>
+          fusionarErrores(prev, ["presupuestoInicial"], body.fields ?? {})
+        );
+        return;
+      }
+
+      if (response.status === 404) {
+        setMensajeGeneral(MENSAJE_OBRA_NO_ENCONTRADA);
+        router.push("/obra");
+        return;
+      }
+
+      setMensajeGeneral(MENSAJE_ERROR_INESPERADO);
+    } catch {
+      setMensajeGeneral(MENSAJE_ERROR_INESPERADO);
+    } finally {
+      setEnviandoPresupuesto(false);
+    }
+  }
+
+  const camposObraJsx = (
+    <>
       {camposTexto.map(({ name, label }) => (
         <div key={name} style={estiloCampo}>
           <label htmlFor={name}>{label}</label>
@@ -261,34 +455,88 @@ export default function ObraForm({ mode }: ObraFormProps) {
           </p>
         )}
       </div>
+    </>
+  );
 
-      <div style={estiloCampo}>
-        <label htmlFor="presupuestoInicial">Presupuesto inicial (ARS)</label>
-        <input
-          id="presupuestoInicial"
-          name="presupuestoInicial"
-          type="text"
-          inputMode="numeric"
-          value={values.presupuestoInicial}
-          onChange={(e) => actualizarCampo("presupuestoInicial", e.target.value)}
-          aria-describedby={
-            errors.presupuestoInicial ? "presupuestoInicial-error" : undefined
-          }
-          style={estiloInput}
-        />
-        {errors.presupuestoInicial && (
-          <p
-            id="presupuestoInicial-error"
-            data-testid="error-presupuestoInicial"
-            style={estiloError}
-          >
-            {errors.presupuestoInicial}
+  const campoPresupuestoJsx = (
+    <div style={estiloCampo}>
+      <label htmlFor="presupuestoInicial">Presupuesto inicial (ARS)</label>
+      <input
+        id="presupuestoInicial"
+        name="presupuestoInicial"
+        type="text"
+        inputMode="numeric"
+        value={values.presupuestoInicial}
+        onChange={(e) => actualizarCampo("presupuestoInicial", e.target.value)}
+        aria-describedby={errors.presupuestoInicial ? "presupuestoInicial-error" : undefined}
+        style={estiloInput}
+      />
+      {errors.presupuestoInicial && (
+        <p
+          id="presupuestoInicial-error"
+          data-testid="error-presupuestoInicial"
+          style={estiloError}
+        >
+          {errors.presupuestoInicial}
+        </p>
+      )}
+    </div>
+  );
+
+  if (mode === "editar") {
+    return (
+      <div>
+        {mensajeGeneral && (
+          <p role="alert" style={estiloMensajeGeneral}>
+            {mensajeGeneral}
           </p>
         )}
-      </div>
 
-      <button type="submit" disabled={enviando}>
-        {enviando ? "Guardando..." : "Guardar obra"}
+        <form
+          onSubmit={handleSubmitObraEditar}
+          noValidate
+          data-testid="obra-form"
+          style={estiloFormulario}
+        >
+          {camposObraJsx}
+          <button type="submit" disabled={enviandoObra}>
+            {enviandoObra ? "Guardando..." : "Guardar datos de la obra"}
+          </button>
+        </form>
+
+        <form
+          onSubmit={handleSubmitPresupuestoEditar}
+          noValidate
+          data-testid="presupuesto-form"
+          style={estiloFormulario}
+        >
+          {campoPresupuestoJsx}
+          <button type="submit" disabled={enviandoPresupuesto}>
+            {enviandoPresupuesto ? "Guardando..." : "Guardar presupuesto"}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      onSubmit={handleSubmitCrear}
+      noValidate
+      data-testid="obra-form"
+      style={estiloFormulario}
+    >
+      {mensajeGeneral && (
+        <p role="alert" style={estiloMensajeGeneral}>
+          {mensajeGeneral}
+        </p>
+      )}
+
+      {camposObraJsx}
+      {campoPresupuestoJsx}
+
+      <button type="submit" disabled={enviandoObra}>
+        {enviandoObra ? "Guardando..." : "Guardar obra"}
       </button>
     </form>
   );
@@ -299,7 +547,8 @@ export default function ObraForm({ mode }: ObraFormProps) {
  * layout usa `width: "100%"` (fluido, se adapta al contenedor) + `boxSizing: "border-box"` (para
  * que el padding no desborde ese 100%), y `maxWidth` solo como tope superior, nunca como ancho
  * fijo. Ver el comentario en ObraForm.test.tsx sobre por qué el test verifica estos estilos en
- * vez de medir scroll real (jsdom no calcula layout).
+ * vez de medir scroll real (jsdom no calcula layout). Reusado tal cual por ambos `<form>` del
+ * modo "editar".
  */
 const estiloFormulario: CSSProperties = {
   display: "flex",
