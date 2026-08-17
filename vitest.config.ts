@@ -19,6 +19,13 @@ function loadDotEnv(file: string) {
 loadDotEnv(path.resolve(__dirname, ".env"));
 
 export default defineConfig({
+  // tsconfig.json sets "jsx": "preserve" (Next.js transforms JSX itself, via SWC). Vitest's own
+  // esbuild-based transform needs to be told explicitly how to handle JSX in component tests
+  // (Block 3) — "automatic" matches React 19's runtime (no `import React` needed per file).
+  // Files with no JSX (all the pre-existing Node-environment tests) are unaffected.
+  esbuild: {
+    jsx: "automatic",
+  },
   test: {
     environment: "node",
     include: ["**/*.test.ts", "**/*.test.tsx"],
