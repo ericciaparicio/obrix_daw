@@ -1,0 +1,11 @@
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  esbuild: true
+  prisma: true
+  sharp: true
+
+overrides:
+  sharp: '>=0.35.0'
+  postcss: '>=8.5.23'
+  vite: '>=6.4.3'
